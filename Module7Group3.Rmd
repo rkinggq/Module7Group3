@@ -1,0 +1,172 @@
+---
+title: "Module 7 Project"
+author: "Regan King"
+date: "2024-11-25"
+output: html_document
+biblography: BIOL3140.bib
+---
+# Introduction
+Each spring, neotropical passerines, including trans-Gulf migrants (TGMs), undertake long-distance migrations from Central and South America to temperate breeding grounds in North America. These migrations, spanning thousands of kilometers, are shaped by critical tradeoffs: arriving early can increase opportunities for mate selection and multiple breeding attempts, while later arrivals may align better with peak food availability in temperate ecosystems (@article{Smith2005,). The timing of these arrivals, therefore, has profound fitness consequences and is influenced by various environmental cues, including temperature and wind patterns along migration routes.
+In the context of climate change, the ability of TGMs to adapt their migration timing in response to shifting meteorological conditions is crucial. A failure to adjust arrival dates to warmer springs could disrupt critical ecological processes, leading to population declines (Both et al. 2006). Despite its importance, the relationship between meteorological variables and arrival times remains debated, with previous studies often limited by their spatial and temporal scope (@article{https://doi.org/10.1111/j.1469-185X.2011.00179.x,).
+Leveraging modern data resources like eBird, a global database of bird observations, offers an unprecedented opportunity to study avian migration patterns at large spatial and taxonomic scales. When combined with meteorological data from NOAA, these resources enable us to explore how temperature and wind conditions influence TGMs’ arrival in Massachusetts (MA). This analysis will also shed light on the potential effects of climate change on population dynamics, offering insights into whether TGMs can adjust to ongoing environmental changes.
+This project uses statistical modeling and visualization to assess whether TGMs’ arrival times vary with meteorological conditions. By addressing this, we aim to evaluate the broader implications of climate change on migratory birds and refine existing hypotheses on the role of climatic variables in long-distance passerine migration.
+
+# Materials and Methods 
+To investigate the relationship between weather conditions and migration timing, we combined eBird occurrence data and NOAA weather data along an assumed migratory route. Specifically, we aimed to determine if weather variables (e.g., temperature and wind) influenced the timing of bird arrivals in Massachusetts. Occurrence data was retrieved from the Global Biodiversity Information Facility (GBIF) using the rgbif package in R, focusing on five bird species observed in Massachusetts during the spring migration season of 2018. To answer spatial and temporal questions about species distribution, we filtered the data to include only human observations (basisOfRecord = "HUMAN_OBSERVATION") and constrained the search to Massachusetts (stateProvince: MA, country: US). The occ_data() function was used in a for loop to query each species, with the results stored in a list. The latitude and longitude coordinates of sightings were mapped using ggmap and cowplot, providing a visual representation of each species’ distribution within the state.
+To examine how weather influenced migration timing, we queried NOAA’s National Centers for Environmental Information (NCEI) API using the rnoaa package. Weather stations in Mobile, AL; Charlotte, NC; and Boston, MA were selected to represent the migratory route from the Gulf of Mexico to Massachusetts, with these locations approximating 10, 5, and 0 days, respectively, before birds arrived in Massachusetts. Hourly weather data included wind direction (wdf2), wind speed (awnd), and temperature extremes (tmin and tmax). Weather data were preprocessed to include Julian day and year columns using str_sub() and mutate(), ensuring compatibility with the eBird dataset. To align weather data with bird arrival timing, we offset Julian day values by 0, 5, or 10 days depending on the station’s location. Wind vectors (wvec) were calculated by converting wind direction to radians (wdir.rad) and adjusting for directional influences using cos(). This processing enabled us to quantify the impact of weather conditions experienced by birds during migration.
+To address whether weather variables explained variations in migration timing, we employed linear mixed-effects models (LMMs) using the lme4 package. These models included fixed effects for temperature and wind vector and random effects for weather station location, allowing slopes and intercepts to vary by location. Interactions among weather variables were included to assess whether their combined effects were significant. Using the Anova() function from the car package, we tested the significance of each fixed effect. To explore alternative explanations, the dredge() function from the MuMInpackage generated all possible combinations of weather variables, with model fit evaluated based on corrected Akaike Information Criterion (AICc).
+Additionally, we modeled bird arrival timing using logistic growth curves to estimate cumulative arrival patterns. Arrival timing was represented as the proportion of birds present by each Julian day, with logistic models fit using the nls() and SSlogis() functions. Key parameters, including the asymptote (maximum proportion), inflection point (midpoint of arrival), and scale (rate of arrival), were estimated and compared across species. This quantitative analysis directly addressed the question of how weather conditions influenced arrival timing by linking environmental variables to migration patterns.
+Qualitative insights were derived by visualizing eBird data distributions and weather station locations on regional maps, providing context for the quantitative models. Together, these analyses—spatial mapping, mixed-effects modeling, and logistic curve fitting—enabled us to answer questions about the influence of weather conditions on migratory timing and patterns for each species.
+
+# Results
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rgbif)
+library(tidyverse)
+library(MuMIn)
+library(data.table)
+library(ggmap)
+library(usmap)
+library(lme4)
+library(car)
+library(rnoaa)
+library(dplyr)
+library(rnoaa)
+library(rnoaa)
+library(parallel)
+library(magick)
+library(cowplot)
+```
+
+```{r}
+species <- c("Piranga olivacea", "Pheucticus ludovicianus", "Dolichonyx oryzivorus", "Icterus spurius", "Icterus galbula")
+years <- 2000:2019
+months <- c(4, 5) # April and May
+
+fetch_data_for_species_year <- function(species, year) {
+  occ_data(
+    scientificName = species,
+    year = year,
+    month = months,
+    limit = 5000,
+    country = "US",
+    basisOfRecord = "HUMAN_OBSERVATION",
+    stateProvince = "Massachusetts"
+  )[[2]]
+}
+fetch_data_for_species <- function(species) {
+  results <- mclapply(years, function(year) {
+    fetch_data_for_species_year(species, year)
+  }, mc.cores = detectCores() - 1)
+  
+  rbindlist(results, fill = TRUE)
+}
+all_species_data <- rbindlist(lapply(species, fetch_data_for_species), fill = TRUE)
+head(all_species_data)
+saveRDS(all_species_data,"massbird.data.RDS")
+dat <- readRDS("massbird.data.RDS")
+dat%>%
+  group_by(year,species)%>%
+  summarise(count=sum(individualCount,na.rm = T))%>%
+  ggplot(aes(x=year,y=count,col=species))+geom_point()
+```
+# # 1Does arrival time vary according to temperature and wind variables along migration route for TGMs migrating to MA?
+```{r}
+mc<- dat%>%
+  group_by(species, year)%>%
+  mutate(date=as.Date(paste0(year,"-",month,"-",day)),
+         j.day=julian(date,origin=as.Date(paste0(unique(year),"-01-01")))
+  )%>%
+  group_by(species,year,j.day,date)%>%
+  summarise(day.tot=sum(individualCount,na.rm=T))%>%
+  group_by(species,year)%>%
+  mutate(prop=cumsum(day.tot/sum(day.tot,na.rm = T)))%>%
+  filter(year>2000)
+mc.pred <- mc%>%
+  group_by(species, year)%>%
+  summarize(
+    pred=predict(nls(prop~SSlogis(j.day,Asym, xmid, scal)),newdata=data.frame(j.day=min(j.day):max(j.day))),    j.day=min(j.day):max(j.day),
+  )%>%
+  left_join(mc%>%dplyr::select(species, year, j.day,date)) 
+mc.arrive.date <-mc.pred%>%
+  group_by(species, year)%>%
+  filter(j.day==j.day[which.min(abs(pred-0.25))])
+```
+# #2 If arrival time does vary with meteorological conditions, what role will climate change potentially play in the population status of TGMs arriving in MA during the spring?
+```{r}
+options(noaakey = "EwrkZUCBvfZZkbgInioAZoyPyXtAXTWp")
+sts <- c(
+  "GHCND:USW00013894", #Mobible, AL 2k away about 10 days away @200 km/day
+  "GHCND:USW00013881", #Charlotte, NC 1000 km away about 6 days away @200 km/day
+  "GHCND:USW00014739" #Boston
+)
+sta.d <- bind_rows( #bind the rows
+  lapply(sts,function(x) ncdc_stations(stationid = x)$data ) 
+)%>%
+  mutate(usmap_transform(.,input_names = c("longitude","latitude"),output_names = c("longitude.1", "latitude.1")))%>% 
+  mutate(name=str_sub(name, -5,-4))%>%
+  mutate(migr.day=c(10,5,0))%>% 
+  separate(id,into = c("station.type","id"))%>%
+    print()
+sta.d <- bind_rows( 
+  lapply(sts,function(x) ncdc_stations(stationid = x)$data ) 
+  )%>%
+  mutate(usmap_transform(.,input_names = c("longitude","latitude"),output_names = c("longitude.1", "latitude.1")))%>% 
+  mutate(name=str_sub(name, -5,-4))%>%
+  mutate(migr.day=c(10,5,0))%>% 
+  separate(id,into = c("station.type","id"))%>%
+        print()
+weather.d <- meteo_pull_monitors(sta.d$id,date_min = "2000-01-01")
+head(weather.d)
+weather.d <- weather.d%>%
+  mutate(year=as.integer(str_sub(date,1,4)), 
+         date=as.Date(date))%>%
+  group_by(year)%>% 
+  mutate(j.day=julian(date,origin=as.Date(paste0(unique(year),"-01-01"))), 
+         date2=date,
+         wdir.rad=(180-abs(wdf2-180))*pi/180, 
+         wvec=cos(wdir.rad)*-1*awnd 
+  )%>% 
+  dplyr::select(id,year,date2,j.day,tmin,tmax,wvec)%>% 
+  left_join(sta.d%>%select(id,name,migr.day))%>%
+  mutate(j.day=j.day+migr.day)
+mc.arr.weath <- mc.arrive.date%>%
+  left_join(weather.d)%>%
+  left_join(mc%>%dplyr::select(year,date,j.day))
+weather.wk <- weather.d %>% 
+  group_by(year, name) %>% 
+  mutate(
+    wk.tmin = frollmean(tmin, n = 14, align = "right"),  
+    wk.tmax = frollmean(tmax, n = 14, align = "right"),
+    wk.wvec = frollmean(wvec, n = 14, align = "right")
+  ) %>%
+  select(j.day, date2, name, wk.tmin, wk.tmax, wk.wvec)
+mc.arr.weath2 <- mc.arrive.date%>%
+  left_join(weather.wk)
+```
+# #3 How does your analysis contribute to, challenge, or refine previous hypothesis concerning the role that climatic variables play in long-distance migration in passerine birds?
+```{r}
+mc.lmer <- lmer(j.day~tmin*tmax*wvec+(1|name),mc.arr.weath,na.action = "na.fail")
+mc.lmer2 <- lmer(j.day ~ wk.tmin * wk.tmax * wk.wvec + (1|name), mc.arr.weath2, na.action = "na.fail")
+
+mc.arr.aic <- dredge(mc.lmer2, fixed = c("wk.tmin", "wk.tmax", "wk.wvec"))
+mc.arr.aic
+
+Anova(mc.lmer)
+Anova(mc.lmer2)
+best.lmer <- lmer(j.day ~ wk.tmin + wk.tmax + wk.wvec + (1|name), mc.arr.weath2, na.action = "na.fail")
+Anova(best.lmer)
+```
+# Discussion
+Our analysis of trans-Gulf migrants arriving in Massachusetts reveals significant relationships between weather conditions along migration routes and arrival timing. Specifically, our linear mixed-effects models demonstrate that both minimum temperature (p = 0.016) and wind vector (p = 0.001) averaged over two weeks were significant predictors of arrival dates, while maximum temperature showed no significant effect. This aligns with the findings of Moore and Kerlinger (1987), who documented that wind conditions and temperature play crucial roles in the stopover patterns of trans-Gulf migrants.
+The strong influence of wind vectors on arrival timing (χ² = 10.43, p = 0.001) particularly underscores the importance of favorable wind conditions for these long-distance migrants. This relationship becomes even more critical when considering climate change scenarios, as changes in atmospheric circulation patterns could significantly impact migration timing and success. Both et al. (2006) found similar evidence in their study of climate change effects on migratory birds, noting that changes in weather patterns along migration routes could lead to population declines in long-distance migrants.
+The significant effect of minimum temperature on arrival timing (χ² = 5.83, p = 0.016) suggests that birds may be responding to temperature thresholds along their migration route, particularly at stopover sites. This finding has important implications for conservation planning, as warming temperatures due to climate change could alter the temporal alignment between migration timing and resource availability at breeding grounds. As Smith and Moore (2005) demonstrated, arrival timing is crucial for reproductive success, and our findings suggest that changing weather patterns could disrupt these carefully timed movements.
+Looking beyond the immediate statistical relationships, our results contribute to the growing body of evidence that climate-related variables significantly influence migration phenology. The interaction between multiple weather variables (as seen in our model selection results) suggests a complex relationship between environmental conditions and migration timing. This complexity highlights the challenge of predicting how migratory species will respond to climate change, particularly given the spatial and temporal variation in warming patterns along migration routes.
+For future conservation efforts, these findings emphasize the need to consider not just conditions at breeding grounds, but also weather patterns along the entire migration route when predicting and managing climate change impacts on migratory birds.
+
+# Contributions
+
+Regan King created the Introduction and Methods section as well as contributed to portions of the code and the biblography
+Abigail Gaudette contributed and finialized the code 
+Lucius Yu-Kisselbach helped review the code and helped produce the discussion section
+
